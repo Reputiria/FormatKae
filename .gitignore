@@ -1,0 +1,8 @@
+.venv/
+.build-deps/
+__pycache__/
+*.pyc
+build/
+dist/
+release/
+test-artifacts/
