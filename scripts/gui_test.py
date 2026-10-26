@@ -3,13 +3,15 @@ import hashlib
 import json
 import os
 import sys
+import tempfile
 import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 ARTIFACTS = ROOT / "test-artifacts"
 ARTIFACTS.mkdir(exist_ok=True)
-os.environ["APPDATA"] = str(ARTIFACTS / "test-settings")
+SETTINGS = tempfile.TemporaryDirectory(prefix="gui-settings-", dir=ARTIFACTS)
+os.environ["APPDATA"] = SETTINGS.name
 sys.path.insert(0, str(ROOT))
 
 from PySide6.QtCore import QTimer

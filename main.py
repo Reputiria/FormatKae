@@ -49,6 +49,7 @@ def main():
             ffmpeg, ffprobe = find_tools()
             report.parent.mkdir(parents=True, exist_ok=True)
             result = {"success": True, "app": APP_NAME, "version": VERSION, "platform": sys.platform, "bits": 64 if sys.maxsize > 2**32 else 32, "ffmpeg": str(ffmpeg), "ffprobe": str(ffprobe), "window_visible": window.isVisible(), "formats": window.format_combo.count()}
+            result["theme"] = window.theme_mode
             if "--probe" in sys.argv:
                 sample = sys.argv[sys.argv.index("--probe") + 1]
                 media = probe(ffprobe, sample)

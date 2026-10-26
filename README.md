@@ -4,7 +4,9 @@
 
 ## 直接使用
 
-打开 `dist\FormatKae\FormatKae.exe`。发布目录含 Python、Qt、FFmpeg 和 ffprobe，无需单独安装这些环境。
+打开 `dist\FormatKae\FormatKae.exe`，即为更新后的 Material 3 界面版本。
+
+发布目录含 Python、Qt、FFmpeg 和 ffprobe，无需单独安装这些环境。常规构建默认输出到 `dist\FormatKae`。
 复制软件时请复制整个 `FormatKae` 文件夹，不能仅复制 EXE。压缩包版本解压后双击同名 EXE 即可。
 适用于 Windows 10/11 x64；本次构建在当前 Windows x64 主机验证。
 
@@ -12,6 +14,12 @@
 2. 选择预设或自行调整输出参数。
 3. 指定输出目录；留空表示分别保存到各个源文件旁。
 4. 开始转换。完成后点击「打开输出目录」。
+
+右上角可切换亮色 / 暗色模式，也可按 `Ctrl+Shift+L`。主题选择立即保存，下次启动自动恢复。
+主界面采用 Material 3 语义配色与卡片队列，常用预设直接显示在队列上方。
+编码器、质量、码率、帧率、采样率等参数位于「高级设置」底部面板，关闭面板保留当前调整。
+每个文件显示独立进度与剩余时间估计，队列顶部显示完成数量。失败原因直接显示在卡片内，点击重试图标只转换该文件。
+完成后通过非模态提示条提供「打开输出文件夹」操作。
 
 ## 功能
 
@@ -81,6 +89,7 @@ python -m venv .venv
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 .\.venv\Scripts\python.exe scripts\integration_test.py
 .\.venv\Scripts\python.exe scripts\gui_test.py
+.\.venv\Scripts\python.exe scripts\ui_test.py
 .\.venv\Scripts\python.exe scripts\packaged_test.py
 .\dist\FormatKae\FormatKae.exe --smoke-test test-artifacts\packaged-smoke.json
 ```
@@ -88,5 +97,10 @@ python -m venv .venv
 实转测试覆盖全部 21 种预设格式与 NUT 自定义封装，以及中文路径、裁剪、缩放、采样率和声道设置。
 GUI 测试覆盖队列转换、取消、失败继续处理、原文件保留和临时文件清理。
 具体报告位于 `test-artifacts`。不保证任意损坏文件、加密媒体或所有编码器组合均能转换。
+
+界面专项报告为 `test-artifacts\m3-ui-report.json`，包含主题记忆、预设选择、长文件名、最小窗口布局、拖入状态、设置面板与单文件重试检查。
+亮暗主题截图为同目录下的 `m3-light-*.png`、`m3-dark-*.png`。两套配色使用同一 Material 3 种子色的预生成色调方案，不增加运行依赖。
+
+新版的打包验证命令：`.\.venv\Scripts\python.exe scripts\packaged_test.py --report test-artifacts\m3-packaged-smoke.json`。
 
 参考：[FFmpeg 官方参数文档](https://ffmpeg.org/ffmpeg.html)、[Qt for Python](https://doc.qt.io/qtforpython-6/)、[PyInstaller](https://pyinstaller.org/en/stable/usage.html)。

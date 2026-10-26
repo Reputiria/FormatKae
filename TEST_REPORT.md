@@ -16,8 +16,33 @@
 | 已打包 EXE 使用包内 ffprobe 检测媒体、包内 FFmpeg 转出 MP3 | 通过 |
 | 已打包 EXE 显示窗口、报告 Windows 64 位、加载 22 个格式选项 | 通过 |
 
-详细报告在项目 `test-artifacts` 目录：`integration-report.json`、`gui-report.json`、`packaged-smoke.json`。
-`gui-converted.png` 和 `packaged-smoke.png` 保存界面实际截图。
+历史集成报告保留在项目 `test-artifacts\integration-report.json`。
+当前界面与打包报告、截图见下方 Material 3 更新记录。
 
 验证使用自动生成的 2 秒 H.264 + AAC 测试媒体。没有验证所有输入编码、损坏/加密文件、硬件编码器或所有手动编码器/封装组合。
 当前主机已验证；其他 Windows 10/11 设备需要实际环境测试。
+
+## Material 3 界面更新 · 2026-10-26
+
+新版构建：`dist\FormatKae\FormatKae.exe`。旧版关闭后，已清理旧发布包与构建缓存，并将新版统一至标准发布目录。
+
+| 本次验证 | 结果 |
+| --- | --- |
+| 7 项核心单元测试 | 全部通过 |
+| 13 项真实 Qt / 转换线程流程检查 | 全部通过 |
+| 32 项界面专项检查 | 全部通过 |
+| 亮暗切换、即时保存、重新创建窗口后恢复主题 | 通过 |
+| 六种预设标签互斥选择、自定义参数取消预设选中态 | 通过 |
+| 卡片点击选中、长文件名省略、1040×800 最小窗口布局 | 两种主题均通过 |
+| 底部高级面板、质量滑块与数值同步、关闭后保留参数 | 两种主题均通过 |
+| 本地拖入高亮、离开复原、拒绝远程 URL | 通过 |
+| 实际转换中切换主题、失败后继续后续任务、非模态完成提示 | 通过 |
+| 失败卡片直接显示原因、重试仅处理该文件 | 通过 |
+| 打包 EXE 从系统临时目录、精简 PATH 启动 | 两种主题均通过 |
+| 打包 EXE 使用附带引擎检测 H.264/AAC 并实际导出 MP3 | 两种主题均通过 |
+
+界面与打包测试使用 Qt offscreen 后端；专项截图显式加载 Windows 字体。
+本次没有修改转码引擎与命令构建逻辑，未重复执行全部输出封装的集成矩阵。
+
+报告：`test-artifacts\m3-ui-report.json`、`gui-report.json`、`m3-packaged-smoke.json`、`m3-packaged-smoke-dark.json`。
+截图：`m3-light-empty.png`、`m3-light-queue.png`、`m3-dark-queue.png`、`m3-light-compact.png`、`m3-dark-compact.png`、`m3-light-advanced.png`、`m3-dark-advanced.png`、`m3-dark-drag.png`、`m3-light-completed.png`。

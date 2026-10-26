@@ -4,26 +4,28 @@ import json
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer, QUrl
+from PySide6.QtCore import Qt, QTimer, QUrl, QSize
 from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont, QIcon
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
     QDoubleSpinBox, QFileDialog, QFormLayout, QFrame, QGroupBox, QHBoxLayout,
-    QHeaderView, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox, QPlainTextEdit,
-    QProgressBar, QPushButton, QScrollArea, QSpinBox, QSplitter, QStackedWidget,
-    QTabWidget, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
+    QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPlainTextEdit,
+    QPushButton, QSlider, QSpinBox, QStackedWidget, QTabWidget, QVBoxLayout, QWidget,
 )
 
 from .core import (
     APP_NAME, AUDIO_CODECS, FORMATS, VIDEO_CODECS, VERSION, Options, app_root,
-    build_command, display_command, find_tools, format_size, format_time,
+    build_command, display_command, effective_duration, find_tools, format_size, format_time,
     load_settings, output_path, save_settings,
 )
 from .workers import ConversionWorker, Job, ProbeWorker
+from .theme import SCHEMES, apply_theme
+from .widgets import BottomSheet, ElidedLabel, JobCard, MaterialComboBox, material_icon, restyle
 
 
 def label(text, name="", wrap=False):
     widget = QLabel(text)
+    widget.setTextFormat(Qt.TextFormat.PlainText)
     if name:
         widget.setObjectName(name)
     widget.setWordWrap(wrap)
@@ -40,7 +42,7 @@ def button(text, callback, name=""):
 
 
 def combo(values, editable=False):
-    widget = QComboBox()
+    widget = MaterialComboBox()
     widget.addItems(values)
     widget.setEditable(editable)
     widget.setMinimumWidth(90)
@@ -59,8 +61,8 @@ class MainWindow(QMainWindow):
         icon = app_icon()
         self.setWindowIcon(icon)
         QApplication.instance().setWindowIcon(icon)
-        self.resize(1380, 900)
-        self.setMinimumSize(1040, 720)
+        self.resize(1380, 960)
+        self.setMinimumSize(1040, 800)
         self.setAcceptDrops(True)
         self.settings = load_settings()
         self.jobs: list[Job] = []
@@ -69,9 +71,16 @@ class MainWindow(QMainWindow):
         self._batch_ids = []
         self._probe_errors = []
         self._busy = False
+        self._updating_options = False
+        self._job_eta = {}
+        self._cards = {}
         self.ffmpeg = None
         self.ffprobe = None
         self.build_ui()
+        self.theme_mode = self.settings.get("theme", "light")
+        if not isinstance(self.theme_mode, str) or self.theme_mode not in SCHEMES:
+            self.theme_mode = "light"
+        self.set_theme(self.theme_mode, persist=False)
         self.apply_options(Options())
         try:
             saved = Options.from_dict(self.settings.get("options", {}))
@@ -91,89 +100,150 @@ class MainWindow(QMainWindow):
 
         sidebar = QFrame()
         sidebar.setObjectName("sidebar")
-        sidebar.setFixedWidth(205)
+        sidebar.setFixedWidth(184)
         side = QVBoxLayout(sidebar)
-        side.setContentsMargins(20, 29, 20, 22)
+        side.setContentsMargins(20, 28, 20, 24)
+        side.setSpacing(12)
         logo = QLabel()
-        logo.setPixmap(app_icon().pixmap(45, 45))
+        logo.setPixmap(app_icon().pixmap(44, 44))
         side.addWidget(logo)
-        side.addSpacing(9)
         side.addWidget(label("FormatKae", "brand"))
-        side.addWidget(label("音视频格式转换器", "muted"))
-        side.addSpacing(32)
-        side.addWidget(label("快速预设  /  PRESETS", "eyebrow"))
-        self.preset_buttons = []
-        for title, key in [("通用视频\nMP4 · H.264", "balanced"), ("更小体积\nMP4 · HEVC", "small"), ("网页视频\nWebM · VP9", "web"), ("提取音频\nMP3 · 192 kbps", "mp3"), ("无损音频\nFLAC · 原始采样率", "flac"), ("动态图片\nGIF · 15 FPS", "gif")]:
-            item = button(title, lambda checked=False, k=key: self.quick_preset(k), "preset")
-            side.addWidget(item)
-            self.preset_buttons.append(item)
+        side.addWidget(label("让格式转换更简单", "muted"))
+        side.addSpacing(24)
+        side.addWidget(label("工作空间", "eyebrow"))
+        self.queue_nav = button("转换队列", lambda: self.tabs.setCurrentIndex(0), "nav")
+        self.log_nav = button("转换日志", lambda: self.tabs.setCurrentIndex(1), "nav")
+        for nav in (self.queue_nav, self.log_nav):
+            nav.setCheckable(True)
+            side.addWidget(nav)
+        self.queue_nav.setChecked(True)
         side.addStretch()
+        side.addWidget(label("本地处理 · 安心转换", "heading", True))
+        side.addWidget(label("文件始终留在你的设备上。", "muted", True))
+        side.addSpacing(16)
         self.engine_status = label("● 正在检测引擎", "accent", True)
         side.addWidget(self.engine_status)
         side.addWidget(button("引擎设置", self.engine_dialog))
-        side.addWidget(button("使用说明 / 关于", self.help_dialog))
-        side.addWidget(label(f"v{VERSION}  ·  Windows x64", "muted"))
+        side.addWidget(button("使用说明", self.help_dialog))
+        side.addWidget(label(f"v{VERSION} · Windows x64", "caption"))
         outer.addWidget(sidebar)
 
         workspace = QWidget()
         layout = QVBoxLayout(workspace)
-        layout.setContentsMargins(24, 24, 24, 20)
+        layout.setContentsMargins(28, 24, 28, 20)
         layout.setSpacing(16)
         header = QHBoxLayout()
         titles = QVBoxLayout()
+        titles.setSpacing(4)
         titles.addWidget(label("把格式，交给你。", "title"))
-        titles.addWidget(label("添加媒体 → 调整参数 → 开始转换", "muted"))
-        header.addLayout(titles)
-        header.addStretch()
-        self.add_button = button("＋ 添加文件", self.choose_files, "primary")
+        titles.addWidget(label("添加媒体，选择格式，轻松开始下一次创作。", "muted"))
+        header.addLayout(titles, 1)
+        self.theme_button = button("暗色模式", self.toggle_theme)
+        self.theme_button.setToolTip("切换亮色 / 暗色模式，自动记住选择")
+        self.theme_button.setAccessibleName("切换界面主题")
         self.add_folder_button = button("添加文件夹", self.choose_folder)
+        self.add_button = button("＋ 添加文件", self.choose_files, "primary")
+        header.addWidget(self.theme_button)
         header.addWidget(self.add_folder_button)
         header.addWidget(self.add_button)
         layout.addLayout(header)
 
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.setChildrenCollapsible(False)
-        left = QWidget()
-        left_layout = QVBoxLayout(left)
-        left_layout.setContentsMargins(0, 0, 0, 0)
-        left_layout.setSpacing(12)
+        self.drop_area = QFrame()
+        self.drop_area.setObjectName("drop")
+        self.drop_area.setProperty("dragging", False)
+        drop_layout = QHBoxLayout(self.drop_area)
+        drop_layout.setContentsMargins(24, 18, 24, 18)
+        drop_layout.setSpacing(20)
+        icon = label("↑", "dropIcon")
+        icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        icon.setFixedSize(48, 48)
+        drop_layout.addWidget(icon)
+        drop_copy = QVBoxLayout()
+        self.drop_title = label("将文件拖放到这里", "heading")
+        drop_copy.addWidget(self.drop_title)
+        drop_copy.addWidget(label("音频 / 视频 / GIF · 支持批量添加与文件夹拖入", "muted"))
+        drop_copy.addWidget(label("MP4、MKV、MOV、WebM、MP3、WAV、FLAC 等", "caption"))
+        drop_layout.addLayout(drop_copy, 1)
+        layout.addWidget(self.drop_area)
+
+        self.params_container = QFrame()
+        self.params_container.setObjectName("card")
+        settings_layout = QVBoxLayout(self.params_container)
+        settings_layout.setContentsMargins(16, 14, 16, 14)
+        settings_layout.setSpacing(12)
+        format_row = QHBoxLayout()
+        format_row.addWidget(label("输出格式", "heading"))
+        self.format_combo = MaterialComboBox()
+        self.format_combo.setAccessibleName("目标格式")
+        for fmt in FORMATS:
+            self.format_combo.addItem(fmt.label, fmt.ext)
+        self.format_combo.setMinimumWidth(200)
+        format_row.addWidget(self.format_combo)
+        self.custom_ext = QLineEdit("nut")
+        self.custom_ext.setPlaceholderText("自定义扩展名，如 nut / mxf")
+        self.custom_ext.setMaximumWidth(200)
+        self.custom_ext.setToolTip("请自行选择与封装兼容的编码器。")
+        format_row.addWidget(self.custom_ext)
+        format_row.addStretch()
+        self.advanced_button = button("高级设置", self.open_advanced)
+        format_row.addWidget(self.advanced_button)
+        format_row.addWidget(button("预设管理", self.presets_menu))
+        settings_layout.addLayout(format_row)
+        chips = QHBoxLayout()
+        chips.setSpacing(8)
+        self.preset_buttons = []
+        for title, key, tip in [
+            ("通用视频", "balanced", "MP4 / H.264 · 平衡质量与体积"),
+            ("更小体积", "small", "MP4 / HEVC · CRF 28，不保证固定文件大小"),
+            ("网页视频", "web", "WebM / VP9"),
+            ("提取音频", "mp3", "MP3 · 192 kbps"),
+            ("无损音频", "flac", "FLAC · 保留原始采样率"),
+            ("动态图片", "gif", "GIF · 640 像素宽 / 15 FPS"),
+        ]:
+            item = button(title, lambda checked=False, k=key: self.quick_preset(k), "chip")
+            item.setCheckable(True)
+            item.setProperty("presetKey", key)
+            item.setToolTip(tip)
+            chips.addWidget(item)
+            self.preset_buttons.append(item)
+        chips.addStretch()
+        settings_layout.addLayout(chips)
+        layout.addWidget(self.params_container)
+
         queue_head = QHBoxLayout()
-        self.queue_count = label("转换队列  ·  0 个文件", "heading")
+        self.queue_count = label("转换队列 · 0 个文件", "heading")
+        self.completed_count = label("已完成 0 / 0", "caption")
         queue_head.addWidget(self.queue_count)
+        queue_head.addWidget(self.completed_count)
         queue_head.addStretch()
-        self.remove_button = button("移除选中", self.remove_selected)
-        self.clear_button = button("清空", self.clear_jobs)
+        self.remove_button = button("移除选中", self.remove_selected, "danger")
+        self.clear_button = button("清空队列", self.clear_jobs, "danger")
         queue_head.addWidget(self.remove_button)
         queue_head.addWidget(self.clear_button)
-        left_layout.addLayout(queue_head)
+        layout.addLayout(queue_head)
         self.tabs = QTabWidget()
+        self.tabs.tabBar().hide()
         self.queue_page = QStackedWidget()
-        empty = QFrame()
-        empty.setObjectName("drop")
+        empty = QWidget()
+        empty.setObjectName("transparent")
         empty_layout = QVBoxLayout(empty)
         empty_layout.addStretch()
-        drop_icon = label("⇄", "accent")
-        drop_icon.setStyleSheet("font-size: 68px; font-weight: 600;")
-        drop_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        empty_layout.addWidget(drop_icon)
-        for text, name in [("拖放音频或视频到这里", "heading"), ("或点击右上角「添加文件」", "muted"), ("支持批量添加 · 支持中文路径 · 本地离线转换", "muted")]:
-            item = label(text, name, True)
+        for text, name in [("你的下一次转换，从这里开始", "heading"),
+                           ("添加文件后，可在这里查看进度和转换结果。", "muted")]:
+            item = label(text, name)
             item.setAlignment(Qt.AlignmentFlag.AlignCenter)
             empty_layout.addWidget(item)
         empty_layout.addStretch()
         self.queue_page.addWidget(empty)
-        self.table = QTableWidget(0, 4)
-        self.table.setHorizontalHeaderLabels(["文件 / 媒体信息", "时长", "大小", "状态"])
-        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table = QListWidget()
+        self.table.setAccessibleName("转换文件队列")
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.table.setAlternatingRowColors(True)
-        self.table.verticalHeader().hide()
-        self.table.verticalHeader().setDefaultSectionSize(64)
-        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        for column in (1, 2, 3):
-            self.table.horizontalHeader().setSectionResizeMode(column, QHeaderView.ResizeMode.ResizeToContents)
-        self.table.cellDoubleClicked.connect(self.media_details)
+        self.table.setResizeMode(QListWidget.ResizeMode.Adjust)
+        self.table.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.table.setSpacing(4)
+        self.table.itemDoubleClicked.connect(lambda item: self.media_details(self.table.row(item)))
+        self.table.itemSelectionChanged.connect(self.sync_selection)
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self.queue_menu)
         self.queue_page.addWidget(self.table)
@@ -181,52 +251,53 @@ class MainWindow(QMainWindow):
         self.log_edit = QPlainTextEdit()
         self.log_edit.setReadOnly(True)
         self.log_edit.setMaximumBlockCount(6000)
-        self.log_edit.setFont(QFont("Consolas", 10))
         self.tabs.addTab(self.log_edit, "转换日志")
-        left_layout.addWidget(self.tabs, 1)
+        self.tabs.currentChanged.connect(self.sync_navigation)
+        layout.addWidget(self.tabs, 1)
 
         destination = QFrame()
         destination.setObjectName("card")
-        dest_layout = QVBoxLayout(destination)
-        dest_layout.setContentsMargins(16, 13, 16, 13)
+        dest_layout = QHBoxLayout(destination)
+        dest_layout.setContentsMargins(16, 12, 16, 12)
         dest_layout.addWidget(label("输出位置", "heading"))
-        dest_row = QHBoxLayout()
         self.output_edit = QLineEdit(str(self.settings.get("output", "")))
+        self.output_edit.setAccessibleName("输出文件夹")
         self.output_edit.setPlaceholderText("留空：保存到每个源文件所在目录")
-        self.output_edit.setToolTip("输出自动添加 _converted 后缀；重名时自动编号，不会覆盖原文件。")
+        self.output_edit.setToolTip("输出自动添加 _converted 后缀；重名时自动编号，原始文件始终保留。")
+        dest_layout.addWidget(self.output_edit, 1)
         self.browse_output_button = button("浏览…", self.choose_output)
-        dest_row.addWidget(self.output_edit, 1)
-        dest_row.addWidget(self.browse_output_button)
-        dest_layout.addLayout(dest_row)
-        dest_layout.addWidget(label("自动避让同名文件，原始素材始终保留。", "muted", True))
-        left_layout.addWidget(destination)
-        splitter.addWidget(left)
+        dest_layout.addWidget(self.browse_output_button)
+        self.open_button = button("打开目录 ↗", self.open_output)
+        dest_layout.addWidget(self.open_button)
+        layout.addWidget(destination)
 
-        self.params_container = QFrame()
-        self.params_container.setObjectName("card")
-        self.params_container.setMinimumWidth(335)
-        params_outer = QVBoxLayout(self.params_container)
-        params_outer.setContentsMargins(14, 14, 14, 12)
-        settings_header = QHBoxLayout()
-        settings_header.addWidget(label("转换参数", "heading"))
-        settings_header.addStretch()
-        settings_header.addWidget(button("预设…", self.presets_menu))
-        params_outer.addLayout(settings_header)
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
+        footer = QFrame()
+        footer.setObjectName("footer")
+        footer_layout = QHBoxLayout(footer)
+        footer_layout.setContentsMargins(16, 14, 16, 14)
+        status_layout = QVBoxLayout()
+        status_layout.setSpacing(4)
+        self.status_label = label("准备就绪", "heading")
+        self.detail_label = ElidedLabel("先添加文件，再选择适合你的转换参数。")
+        self.detail_label.setObjectName("muted")
+        status_layout.addWidget(self.status_label)
+        status_layout.addWidget(self.detail_label)
+        footer_layout.addLayout(status_layout, 1)
+        self.cancel_button = button("取消转换", self.cancel_conversion, "danger")
+        self.cancel_button.setEnabled(False)
+        self.start_button = button("开始转换", self.start_conversion, "primary")
+        self.start_button.setMinimumSize(152, 44)
+        footer_layout.addWidget(self.cancel_button)
+        footer_layout.addWidget(self.start_button)
+        layout.addWidget(footer)
+        outer.addWidget(workspace, 1)
+
+        self.advanced_sheet = BottomSheet(self)
         params = QWidget()
+        params.setObjectName("transparent")
         params_layout = QVBoxLayout(params)
-        params_layout.setContentsMargins(0, 0, 8, 4)
-        self.format_combo = QComboBox()
-        for fmt in FORMATS:
-            self.format_combo.addItem(fmt.label, fmt.ext)
-        params_layout.addWidget(label("目标格式", "muted"))
-        params_layout.addWidget(self.format_combo)
-        self.custom_ext = QLineEdit("nut")
-        self.custom_ext.setPlaceholderText("自定义扩展名，例如 mxf / nut")
-        self.custom_ext.setToolTip("请自行选择与封装兼容的编码器；具体支持范围取决于 FFmpeg。")
-        params_layout.addWidget(self.custom_ext)
-
+        params_layout.setContentsMargins(0, 0, 8, 8)
+        params_layout.setSpacing(16)
         self.video_group = QGroupBox("视频设置")
         form = QFormLayout(self.video_group)
         form.setSpacing(10)
@@ -236,7 +307,18 @@ class MainWindow(QMainWindow):
         self.quality = QSpinBox()
         self.quality.setRange(0, 63)
         self.quality.setToolTip("CRF / CQ 越低画质越高、体积越大；H.264 / H.265 上限 51。仅适用于支持的编码器，码率优先。")
-        form.addRow("质量 CRF / CQ", self.quality)
+        quality_row = QWidget()
+        quality_row.setObjectName("transparent")
+        quality_layout = QHBoxLayout(quality_row)
+        quality_layout.setContentsMargins(0, 0, 0, 0)
+        self.quality_slider = QSlider(Qt.Orientation.Horizontal)
+        self.quality_slider.setRange(0, 63)
+        self.quality_slider.setAccessibleName("视频质量")
+        self.quality_slider.valueChanged.connect(self.quality.setValue)
+        self.quality.valueChanged.connect(self.quality_slider.setValue)
+        quality_layout.addWidget(self.quality_slider, 1)
+        quality_layout.addWidget(self.quality)
+        form.addRow("质量 CRF / CQ", quality_row)
         self.speed = combo(["ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow"])
         self.speed.setToolTip("用于 x264 / x265 / SVT-AV1。越慢通常压缩率越高。")
         form.addRow("编码速度", self.speed)
@@ -307,46 +389,151 @@ class MainWindow(QMainWindow):
         params_layout.addWidget(advanced)
         params_layout.addWidget(label("默认处理首个视频与音频轨道，不保留字幕或附件。硬件编码可用性取决于设备与驱动。", "muted", True))
         params_layout.addStretch()
-        scroll.setWidget(params)
-        params_outer.addWidget(scroll)
-        splitter.addWidget(self.params_container)
-        splitter.setSizes([740, 365])
-        splitter.setStretchFactor(0, 1)
-        layout.addWidget(splitter, 1)
 
-        footer = QFrame()
-        footer.setObjectName("footer")
-        footer_layout = QHBoxLayout(footer)
-        footer_layout.setContentsMargins(17, 14, 17, 14)
-        status_layout = QVBoxLayout()
-        self.status_label = label("准备就绪", "heading")
-        self.detail_label = label("先添加文件，再选择适合你的转换参数。", "muted", True)
-        self.overall_progress = QProgressBar()
-        self.overall_progress.setValue(0)
-        self.overall_progress.setTextVisible(False)
-        self.overall_progress.setFixedHeight(6)
-        self.overall_progress.setStyleSheet("QProgressBar { min-height: 4px; border: none; }")
-        status_layout.addWidget(self.status_label)
-        status_layout.addWidget(self.detail_label)
-        status_layout.addWidget(self.overall_progress)
-        footer_layout.addLayout(status_layout, 1)
-        self.open_button = button("打开输出目录", self.open_output)
-        self.cancel_button = button("取消转换", self.cancel_conversion, "danger")
-        self.cancel_button.setEnabled(False)
-        self.start_button = button("▶ 开始转换", self.start_conversion, "primary")
-        self.start_button.setMinimumSize(145, 46)
-        footer_layout.addWidget(self.open_button)
-        footer_layout.addWidget(self.cancel_button)
-        footer_layout.addWidget(self.start_button)
-        layout.addWidget(footer)
-        outer.addWidget(workspace, 1)
+        self.advanced_sheet.scroll.setWidget(params)
+        self.advanced_sheet.finished.connect(self.sync_options_ui)
+        self.add_supporting_text(params)
+
+        self.snackbar = QFrame(root)
+        self.snackbar.setObjectName("snackbar")
+        snack_layout = QHBoxLayout(self.snackbar)
+        snack_layout.setContentsMargins(16, 6, 8, 6)
+        self.snack_label = label("")
+        self.snack_label.setTextFormat(Qt.TextFormat.PlainText)
+        snack_layout.addWidget(self.snack_label, 1)
+        snack_layout.addWidget(button("打开输出文件夹", self.open_output))
+        dismiss = button("×", self.snackbar.hide, "icon")
+        dismiss.setAccessibleName("关闭完成提示")
+        snack_layout.addWidget(dismiss)
+        self.snackbar.hide()
+        self.snack_timer = QTimer(self)
+        self.snack_timer.setSingleShot(True)
+        self.snack_timer.timeout.connect(self.snackbar.hide)
+
         self.format_combo.currentIndexChanged.connect(self.format_changed)
         self.video_codec.currentTextChanged.connect(self.codec_changed)
         self.audio_codec.currentTextChanged.connect(self.codec_changed)
+        for widget in params.findChildren(QComboBox):
+            widget.currentTextChanged.connect(self.sync_options_ui)
+        for widget in params.findChildren(QSpinBox):
+            widget.valueChanged.connect(self.sync_options_ui)
+        self.volume.valueChanged.connect(self.sync_options_ui)
+        for widget in params.findChildren(QLineEdit):
+            widget.textChanged.connect(self.sync_options_ui)
+        self.extra.textChanged.connect(self.sync_options_ui)
+        self.metadata.toggled.connect(self.sync_options_ui)
+        self.custom_ext.textChanged.connect(self.sync_options_ui)
         action = QAction("添加文件", self)
         action.setShortcut("Ctrl+O")
         action.triggered.connect(self.choose_files)
         self.addAction(action)
+        theme_action = QAction("切换亮暗主题", self)
+        theme_action.setShortcut("Ctrl+Shift+L")
+        theme_action.triggered.connect(self.toggle_theme)
+        self.addAction(theme_action)
+
+    def set_theme(self, mode, persist=True):
+        self.theme_mode = mode
+        self.settings["theme"] = mode
+        apply_theme(QApplication.instance(), mode)
+        self.theme_button.setText("亮色模式" if mode == "dark" else "暗色模式")
+        self.theme_button.setAccessibleName("切换到亮色模式" if mode == "dark" else "切换到暗色模式")
+        for widget, name, role in [
+            (self.theme_button, "sun" if mode == "dark" else "moon", "onSurface"),
+            (self.advanced_button, "tune", "onSurface"),
+            (self.queue_nav, "queue", "onSecondaryContainer"),
+            (self.log_nav, "log", "onSurfaceVariant"),
+            (self.start_button, "play", "onPrimary"),
+        ]:
+            widget.setIcon(material_icon(name, QColor(SCHEMES[mode][role])))
+            widget.setIconSize(QSize(18, 18))
+        self.update_titlebar()
+        if persist:
+            self.persist_settings()
+
+    def toggle_theme(self):
+        self.set_theme("light" if self.theme_mode == "dark" else "dark")
+
+    def update_titlebar(self):
+        if sys.platform == "win32":
+            import ctypes
+            dark = ctypes.c_int(self.theme_mode == "dark")
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                ctypes.c_void_p(int(self.winId())), 20, ctypes.byref(dark), ctypes.sizeof(dark))
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.update_titlebar()
+
+    def sync_navigation(self, index):
+        self.queue_nav.setChecked(index == 0)
+        self.log_nav.setChecked(index == 1)
+
+    def open_advanced(self):
+        if not self._busy:
+            self.advanced_sheet.open_at_bottom()
+
+    def add_supporting_text(self, params):
+        explanations = {
+            "编码器": "copy 直接复制轨道；硬件编码需要设备与驱动支持。",
+            "质量 CRF / CQ": "数值越低，质量越高、体积越大；填写码率后优先使用码率。",
+            "编码速度": "越慢通常压缩率越高，转换耗时越长。",
+            "视频码率": "留空使用质量模式；可填写 5M 或 2500k。",
+            "宽 × 高": "均为自动时保留原尺寸；仅填一项时按比例缩放。",
+            "帧率 FPS": "保留原始帧率，或选择目标帧率，如 30。",
+            "音频码率": "数值越高通常音质越好；无损编码器不使用此项。",
+            "采样率 Hz": "保留原始或指定目标采样率，常用值为 44100 / 48000。",
+            "声道数": "1 为单声道、2 为立体声；保留原始可避免额外转换。",
+            "音量": "100% 保持原音量；提高音量可能产生失真。",
+            "开始时间": "源文件中的起点；支持秒数和 HH:MM:SS。",
+            "结束时间": "源文件中的终点；留空处理至文件结束。",
+            "编码线程": "自动由编码器分配；手动设置可限制 CPU 使用。",
+            "额外输出参数": "追加 FFmpeg 输出选项；不填输入或输出路径。",
+        }
+        for group in params.findChildren(QGroupBox):
+            form = group.layout()
+            for row in range(form.rowCount() - 1, -1, -1):
+                field_label = form.itemAt(row, QFormLayout.ItemRole.LabelRole)
+                if field_label and isinstance(field_label.widget(), QLabel):
+                    explanation = explanations.get(field_label.widget().text())
+                    if explanation:
+                        form.insertRow(row + 1, label(explanation, "muted", True))
+
+    def sync_options_ui(self, *_):
+        if self._updating_options:
+            return
+        current = self.current_options()
+        for item in self.preset_buttons:
+            item.setChecked(current == self.preset_options(item.property("presetKey")))
+        self.update_queue_cards()
+
+    def sync_selection(self):
+        for row in range(self.table.count()):
+            item = self.table.item(row)
+            card = self.table.itemWidget(item)
+            if card:
+                card.setProperty("selected", item.isSelected())
+                restyle(card)
+        self.update_buttons()
+
+    def position_snackbar(self):
+        width = min(760, self.centralWidget().width() - 224)
+        self.snackbar.setGeometry(self.centralWidget().width() - width - 28,
+                                  self.centralWidget().height() - 166, width, 60)
+
+    def show_completion(self, text):
+        self.snack_label.setText(text)
+        self.position_snackbar()
+        self.snackbar.show()
+        self.snackbar.raise_()
+        self.snack_timer.start(10000)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, "snackbar"):
+            self.position_snackbar()
+        if hasattr(self, "advanced_sheet") and self.advanced_sheet.isVisible():
+            self.advanced_sheet.open_at_bottom()
 
     def current_options(self):
         def text(widget, placeholder):
@@ -363,6 +550,7 @@ class MainWindow(QMainWindow):
         )
 
     def apply_options(self, opt):
+        self._updating_options = True
         index = self.format_combo.findData(opt.format)
         self.format_combo.setCurrentIndex(max(0, index))
         for widget, value in [(self.video_codec, opt.video_codec), (self.audio_codec, opt.audio_codec), (self.speed, opt.preset),
@@ -376,6 +564,8 @@ class MainWindow(QMainWindow):
         self.metadata.setChecked(opt.metadata)
         self.extra.setPlainText(opt.extra)
         self.update_parameter_availability()
+        self._updating_options = False
+        self.sync_options_ui()
 
     def format_changed(self):
         fmt = FORMATS[self.format_combo.currentIndex()]
@@ -389,6 +579,7 @@ class MainWindow(QMainWindow):
         self.width.setValue(640 if fmt.kind == "gif" else 0)
         self.height.setValue(0)
         self.update_parameter_availability()
+        self.sync_options_ui()
 
     def codec_changed(self):
         if hasattr(self, "width") and self.video_codec.currentText() == "copy":
@@ -413,6 +604,7 @@ class MainWindow(QMainWindow):
         acodec = self.audio_codec.currentText()
         self.video_codec.setEnabled(fmt.kind != "gif")
         self.quality.setEnabled(fmt.kind != "gif" and (vcodec in {"libx264", "libx265", "libsvtav1", "libvpx-vp9", "libvpx"} or vcodec.endswith("_nvenc")))
+        self.quality_slider.setEnabled(self.quality.isEnabled())
         self.speed.setEnabled(fmt.kind != "gif" and vcodec in {"libx264", "libx265", "libsvtav1"})
         self.video_bitrate.setEnabled(fmt.kind != "gif" and vcodec != "copy")
         for item in (self.width, self.height, self.fps):
@@ -421,9 +613,8 @@ class MainWindow(QMainWindow):
             item.setEnabled(acodec not in {"copy", "禁用音频"})
         self.audio_bitrate.setEnabled(acodec not in {"copy", "禁用音频", "alac", "flac"} and not acodec.startswith("pcm_"))
 
-    def quick_preset(self, key):
-        if self._busy:
-            return
+    @staticmethod
+    def preset_options(key):
         opt = Options()
         if key == "small":
             opt.video_codec, opt.quality = "libx265", 28
@@ -435,9 +626,14 @@ class MainWindow(QMainWindow):
             opt.format, opt.audio_codec = "flac", "flac"
         elif key == "gif":
             opt.format, opt.width, opt.fps = "gif", 640, "15"
-        self.apply_options(opt)
+        return opt
+
+    def quick_preset(self, key):
+        if self._busy:
+            return
+        self.apply_options(self.preset_options(key))
         self.status_label.setText("预设已应用")
-        self.detail_label.setText("可继续调整右侧参数；开始转换时应用于所有待处理文件。")
+        self.detail_label.setText("可在高级设置中继续调整；开始转换时应用于所有待处理文件。")
 
     def detect_engine(self):
         try:
@@ -554,42 +750,65 @@ class MainWindow(QMainWindow):
             self.notify("部分文件无法添加", "\n\n".join(self._probe_errors[:5]) + ("\n更多详情见转换日志。" if len(self._probe_errors) > 5 else ""))
 
     def refresh_table(self):
-        self.queue_count.setText(f"转换队列  ·  {len(self.jobs)} 个文件")
+        selected = {job.id for job in self.selected_jobs()}
+        scroll = self.table.verticalScrollBar().value()
+        self.table.blockSignals(True)
+        self.table.clear()
+        self._cards.clear()
+        for job in self.jobs:
+            item = QListWidgetItem()
+            item.setData(Qt.ItemDataRole.UserRole, job.id)
+            self.table.addItem(item)
+            card = JobCard(job, lambda checked=False, identity=job.id: self.card_action(identity))
+            self.table.setItemWidget(item, card)
+            self._cards[job.id] = (item, card)
+            item.setSelected(job.id in selected)
+        self.table.blockSignals(False)
         self.queue_page.setCurrentIndex(1 if self.jobs else 0)
-        selected = {i.row() for i in self.table.selectionModel().selectedRows()}
-        self.table.setRowCount(len(self.jobs))
-        for row, job in enumerate(self.jobs):
-            media = job.media
-            info = f"{media.width}×{media.height} · {media.video.upper()}" if media.video else "音频"
-            if media.audio:
-                info += f" · {media.audio.upper()}"
-            first = QTableWidgetItem(f"{Path(media.path).name}\n{info}")
-            first.setToolTip(f"{media.path}\n双击查看媒体信息或错误详情")
-            self.table.setItem(row, 0, first)
-            self.table.setItem(row, 1, QTableWidgetItem(format_time(media.duration) if media.duration else "未知"))
-            self.table.setItem(row, 2, QTableWidgetItem(format_size(media.size)))
-            self.table.setItem(row, 3, self.status_item(job))
-        for row in selected:
-            if row < len(self.jobs):
-                self.table.selectRow(row)
+        self.queue_count.setText(f"转换队列 · {len(self.jobs)} 个文件")
+        self.update_queue_cards()
+        self.sync_selection()
+        self.table.verticalScrollBar().setValue(scroll)
         self.update_buttons()
 
-    def status_item(self, job):
-        item = QTableWidgetItem(f"{job.progress}%" if job.state == "转换中" else job.state)
-        colors = {"已完成": "#73d8b2", "失败": "#ff9da6", "已取消": "#d7b986", "转换中": "#89b0ff"}
-        item.setForeground(QColor(colors.get(job.state, "#a1b1cd")))
-        if job.error:
-            item.setToolTip(job.error[-3000:])
-        return item
+    def update_queue_cards(self):
+        if not hasattr(self, "format_combo"):
+            return
+        for job in self.jobs:
+            self.update_job_row(job)
+        self.completed_count.setText(f"已完成 {sum(j.state == '已完成' for j in self.jobs)} / {len(self.jobs)}")
 
     def update_job_row(self, job):
-        row = self.jobs.index(job)
-        self.table.setItem(row, 3, self.status_item(job))
+        entry = self._cards.get(job.id)
+        if not entry:
+            return
+        item, card = entry
+        target = self.custom_ext.text().strip() if self.format_combo.currentData() == "nut" else self.format_combo.currentData()
+        if job.output and job.state in {"转换中", "已完成"}:
+            target = Path(job.output).suffix.lstrip(".")
+        card.update_job(job, target or "自定义", self._busy, self._job_eta.get(job.id, ""))
+        item.setSizeHint(QSize(0, 176 if job.state == "失败" else 108))
+        self.completed_count.setText(f"已完成 {sum(j.state == '已完成' for j in self.jobs)} / {len(self.jobs)}")
+
+    def card_action(self, job_id):
+        if self._busy:
+            return
+        job = next((j for j in self.jobs if j.id == job_id), None)
+        if not job:
+            return
+        if job.state == "失败":
+            self.requeue(self.jobs.index(job))
+            self.start_conversion(job_ids={job.id})
+        else:
+            self.jobs.remove(job)
+            self.refresh_table()
 
     def set_busy(self, busy):
         self._busy = busy
         for widget in [self.add_button, self.add_folder_button, self.remove_button, self.clear_button, self.params_container, self.output_edit, self.browse_output_button, *self.preset_buttons]:
             widget.setEnabled(not busy)
+        self.advanced_sheet.setEnabled(not busy)
+        self.update_queue_cards()
         self.update_buttons()
 
     def update_buttons(self):
@@ -597,16 +816,18 @@ class MainWindow(QMainWindow):
             return
         self.start_button.setEnabled(not self._busy and bool(self.ffmpeg) and any(j.state != "已完成" for j in self.jobs))
         self.cancel_button.setEnabled(self.converter is not None and not self.converter.cancelled.is_set())
+        self.remove_button.setEnabled(not self._busy and bool(self.selected_jobs()))
+        self.clear_button.setEnabled(not self._busy and bool(self.jobs))
 
     def choose_output(self):
         folder = QFileDialog.getExistingDirectory(self, "选择输出目录", self.output_edit.text())
         if folder:
             self.output_edit.setText(folder)
 
-    def start_conversion(self):
+    def start_conversion(self, checked=False, job_ids=None):
         if self._busy or not self.ffmpeg:
             return
-        pending = [j for j in self.jobs if j.state != "已完成"]
+        pending = [j for j in self.jobs if j.state != "已完成" and (job_ids is None or j.id in job_ids)]
         if not pending:
             return
         options = self.current_options()
@@ -628,6 +849,8 @@ class MainWindow(QMainWindow):
             return
         self.persist_settings()
         self._batch_ids = [job.id for job in pending]
+        self._job_eta.clear()
+        self.snackbar.hide()
         for job in pending:
             job.progress, job.state, job.error, job.output = 0, "等待转换", "", ""
         self.converter = ConversionWorker(self.ffmpeg, tasks, options, self)
@@ -637,7 +860,6 @@ class MainWindow(QMainWindow):
         self.converter.finished.connect(self.conversion_finished)
         self.set_busy(True)
         self.refresh_table()
-        self.overall_progress.setValue(0)
         self.status_label.setText(f"正在转换  ·  {len(tasks)} 个任务")
         self.detail_label.setText("所有任务使用当前参数，按顺序处理。")
         self.converter.start()
@@ -658,15 +880,18 @@ class MainWindow(QMainWindow):
         job = next((j for j in self.jobs if j.id == job_id), None)
         if job:
             job.progress = value
+            try:
+                rate = float(speed.rstrip("x"))
+                remaining = effective_duration(job.media, self.converter.options) * (1 - value / 100) / rate
+                self._job_eta[job.id] = f"预计剩余 {format_time(remaining)}" if rate > 0 and remaining >= 0 else "正在估算剩余时间…"
+            except (ValueError, ZeroDivisionError, AttributeError):
+                self._job_eta[job.id] = "正在估算剩余时间…"
             self.update_job_row(job)
             self.detail_label.setText(f"{Path(job.media.path).name}  ·  {value}%" + (f"  ·  速度 {speed}" if speed and speed != "N/A" else ""))
             self.update_overall()
 
     def update_overall(self):
-        batch = [j for j in self.jobs if j.id in self._batch_ids]
-        if batch:
-            value = sum(100 if j.state in {"已完成", "失败", "已取消"} else j.progress for j in batch) // len(batch)
-            self.overall_progress.setValue(value)
+        self.completed_count.setText(f"已完成 {sum(j.state == '已完成' for j in self.jobs)} / {len(self.jobs)}")
 
     def cancel_conversion(self):
         if self.converter:
@@ -682,13 +907,15 @@ class MainWindow(QMainWindow):
         done = sum(j.state == "已完成" for j in batch)
         failed = sum(j.state == "失败" for j in batch)
         cancelled = sum(j.state == "已取消" for j in batch)
-        self.status_label.setText("转换结束" if failed or cancelled else "全部转换完成")
-        self.detail_label.setText(f"成功 {done}  ·  失败 {failed}  ·  取消 {cancelled}" + ("。双击失败任务查看原因，调整参数后可重试。" if failed else "。可打开输出目录查看文件。"))
+        remaining = any(j.state == "等待转换" for j in self.jobs)
+        self.status_label.setText("转换结束" if failed or cancelled else ("本次转换完成" if remaining else "全部转换完成"))
+        self.detail_label.setText(f"成功 {done}  ·  失败 {failed}  ·  取消 {cancelled}" + ("。失败原因已在卡片中显示，可点击重试。" if failed else "。可打开输出目录查看文件。"))
         self.refresh_table()
-        QApplication.alert(self, 2000)
+        self.show_completion(f"转换结束 · 成功 {done} 个" + (f"，失败 {failed} 个" if failed else "") + (f"，取消 {cancelled} 个" if cancelled else ""))
 
     def selected_jobs(self):
-        return [self.jobs[i.row()] for i in self.table.selectionModel().selectedRows() if i.row() < len(self.jobs)]
+        identities = {item.data(Qt.ItemDataRole.UserRole) for item in self.table.selectedItems()}
+        return [job for job in self.jobs if job.id in identities]
 
     def remove_selected(self):
         if self._busy:
@@ -701,7 +928,7 @@ class MainWindow(QMainWindow):
         if not self._busy:
             self.jobs.clear()
             self.refresh_table()
-            self.overall_progress.setValue(0)
+            self.snackbar.hide()
             self.status_label.setText("准备就绪")
             self.detail_label.setText("添加媒体文件以开始新的转换。")
 
@@ -737,9 +964,10 @@ class MainWindow(QMainWindow):
         self.text_dialog("媒体信息", text)
 
     def queue_menu(self, point):
-        row = self.table.rowAt(point.y())
-        if row < 0:
+        item = self.table.itemAt(point)
+        if not item:
             return
+        row = self.table.row(item)
         menu = QMenu(self)
         menu.addAction("查看媒体信息 / 错误详情", lambda: self.media_details(row))
         menu.addAction("打开源文件所在目录", lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(Path(self.jobs[row].media.path).parent))))
@@ -753,6 +981,8 @@ class MainWindow(QMainWindow):
 
     def requeue(self, row):
         self.jobs[row].state, self.jobs[row].progress = "等待转换", 0
+        self.jobs[row].error = ""
+        self.jobs[row].output = ""
         self.refresh_table()
 
     def command_dialog(self):
@@ -830,9 +1060,10 @@ class MainWindow(QMainWindow):
         self.text_dialog("使用说明 / 关于 FormatKae", f"""FormatKae {VERSION} · Windows x64 音视频格式转换器
 
 1. 添加文件、文件夹或将文件拖入窗口。Ctrl+O 可快速添加文件。
-2. 选择左侧快速预设，或在右侧选择目标格式与编码参数。
+2. 选择队列上方的格式与预设；编码参数可在「高级设置」底部面板调整。
 3. 指定输出目录；留空则分别保存到每个源文件旁。
-4. 点击开始转换。双击任务可查看媒体信息或错误详情。
+4. 点击开始转换。双击任务可查看媒体信息；失败卡片内可直接重试。
+5. 右上角切换亮色 / 暗色模式（Ctrl+Shift+L），下次启动自动恢复。
 
 批量队列：本次所有待处理文件使用同一组参数，顺序执行。
 已完成的文件不会重复转换；右键「重新加入待转换」可再次处理。
@@ -878,15 +1109,31 @@ NVENC / QSV / AMF 需要支持的硬件及驱动，失败时可改用软件编�
         box.exec()
 
     def dragEnterEvent(self, event):
-        if event.mimeData().hasUrls() and not self._busy:
+        if event.mimeData().hasUrls() and any(url.isLocalFile() for url in event.mimeData().urls()) and not self._busy:
+            self.set_drop_hover(True)
             event.acceptProposedAction()
 
+    def dragMoveEvent(self, event):
+        if event.mimeData().hasUrls() and any(url.isLocalFile() for url in event.mimeData().urls()) and not self._busy:
+            event.acceptProposedAction()
+
+    def dragLeaveEvent(self, event):
+        self.set_drop_hover(False)
+        event.accept()
+
+    def set_drop_hover(self, active):
+        self.drop_area.setProperty("dragging", active)
+        self.drop_title.setText("松开以添加" if active else "将文件拖放到这里")
+        restyle(self.drop_area)
+
     def dropEvent(self, event):
+        self.set_drop_hover(False)
         if not self._busy:
             self.add_paths([url.toLocalFile() for url in event.mimeData().urls() if url.isLocalFile()])
             event.acceptProposedAction()
 
     def closeEvent(self, event):
+        self.advanced_sheet.close()
         if self.converter:
             answer = QMessageBox.question(self, "退出 FormatKae", "转换仍在进行，退出将取消本次未完成任务。是否退出？", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
             if answer != QMessageBox.StandardButton.Yes:
