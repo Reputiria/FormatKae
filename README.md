@@ -4,12 +4,6 @@
 
 ## 直接使用
 
-打开 `dist\FormatKae\FormatKae.exe`，即为更新后的 Material 3 界面版本。
-
-发布目录含 Python、Qt、FFmpeg 和 ffprobe，无需单独安装这些环境。常规构建默认输出到 `dist\FormatKae`。
-复制软件时请复制整个 `FormatKae` 文件夹，不能仅复制 EXE。压缩包版本解压后双击同名 EXE 即可。
-适用于 Windows 10/11 x64；本次构建在当前 Windows x64 主机验证。
-
 1. 添加文件、文件夹（递归搜索常见媒体）或将文件拖入窗口。
 2. 选择预设或自行调整输出参数。
 3. 指定输出目录；留空表示分别保存到各个源文件旁。
